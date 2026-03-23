@@ -1,0 +1,51 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{bm}
+\usepackage{cite}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{authblk}
+\usepackage[most]{tcolorbox}
+
+% Nature-style formatting
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{sectsty}
+\allsectionsfont{\sffamily\bfseries}
+
+\title{Scientific Literature Review}
+\author{UniversalReviewer (v9.0)}
+\affil{Autonomous Agentic Research Framework}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This review was synthesized by UniversalReviewer, an autonomous multi-agent system. It integrates evidence from an extensive citation network (150+ sources) through recursive discovery and deep modular synthesis.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+\input{sections/sec1.tex}
+\input{sections/sec2.tex}
+\input{sections/sec3.tex}
+\input{sections/sec4.tex}
+\input{sections/sec5.tex}
+\input{sections/sec6.tex}
+\input{sections/sec7.tex}
+
+\newpage
+\bibliographystyle{naturemag}
+\bibliography{references}
+
+\end{document}
