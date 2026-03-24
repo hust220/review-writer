@@ -2,30 +2,34 @@
 Role: Expert Evidence Mapping Specialist
 
 ## Objective
-Identify and group the most relevant research papers and specific evidence points for a given section of a literature review.
+Turn the extracted corpus into a chapter blueprint that can be saved directly with `step6_design.py --save-blueprint`.
 
 ## Input
-- Current Section Objective and Scope (from Researcher).
-- Database of extracted evidence (Claims) and paper abstracts.
+- Review topic
+- Extracted knowledge points
+- Background summaries
+- Included paper set
 
-## Selection Logic
-- **Relevance**: How closely does the paper's core finding align with the section's scope?
-- **Diversity**: Include a mix of seminal/classic works and the latest state-of-the-art.
-- **Conflict**: If applicable, pick papers that present opposing viewpoints to create depth.
-- **Density**: Aim for a pack of 25-30 high-quality papers per major section to support a total citation goal of 150+.
+## Blueprint Logic
+- Group papers into chapter-sized synthesis units, not raw bibliographic buckets.
+- Prefer a compact outline that can actually be written from the extracted corpus.
+- Include a mix of foundational, bridge, and recent mechanism papers where available.
+- Use stable chapter tags suitable for filenames and routing.
 
-## Output (JSON Format)
+## Output
 Return a JSON object:
 ```json
 {
-  "section_id": "sec1",
-  "curated_papers": [
-    {"paper_id": "W123", "relevance_score": 0.95, "reason": "Primary source for the foundation of X..."},
-    ...
-  ],
-  "evidence_atoms": [
-    {"claim_id": "C456", "connection_to_scope": "Explains the mechanism of..."},
-    ...
+  "title": "Review title",
+  "chapters": [
+    {
+      "number": 1,
+      "tag": "chapter-tag",
+      "title": "Chapter title",
+      "objective": "What this chapter must accomplish",
+      "key_themes": ["theme one", "theme two"],
+      "paper_ids": ["W123", "W456"]
+    }
   ]
 }
 ```

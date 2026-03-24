@@ -1,4 +1,4 @@
--- Review-OS Agentic Plugin Schema (v14.0 - Knowledge-Driven)
+-- Review-OS Agentic Plugin Schema (v18.0 - Knowledge-Driven)
 
 -- Papers Table: Tracks all identified papers and their PMCID
 CREATE TABLE IF NOT EXISTS papers (
@@ -10,19 +10,21 @@ CREATE TABLE IF NOT EXISTS papers (
     abstract TEXT,
     year INTEGER,
     journal VARCHAR,
-    volume VARCHAR, -- New: Journal volume
-    issue VARCHAR,  -- New: Journal issue
-    pages VARCHAR,  -- New: Page numbers
+    volume VARCHAR,
+    issue VARCHAR,
+    pages VARCHAR,
     authors_json TEXT,
-    referenced_works_json TEXT, -- New: List of OpenAlex IDs cited by this paper
+    referenced_works_json TEXT, -- List of OpenAlex IDs cited by this paper
     citation_count INTEGER,
     oa_status VARCHAR DEFAULT 'unknown',
     fulltext_status VARCHAR DEFAULT 'none', -- none, fetched, parsed
     fulltext_path VARCHAR,
-    access_method VARCHAR, -- pmc_oa, pmc_proxy, publisher_oa, publisher_proxy
+    access_method VARCHAR, -- pmc_oa, pmc_proxy, publisher_oa, publisher_proxy, oa_pdf
     screening_status VARCHAR DEFAULT 'pending', -- pending, include, maybe, exclude
+    paper_role VARCHAR DEFAULT 'primary', -- primary (included paper), citation (reference only)
     relevance_score FLOAT,
     screening_reason TEXT,
+    needs_fulltext BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -95,10 +97,28 @@ CREATE TABLE IF NOT EXISTS reference_stubs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Knowledge-Chapter Links: Maps knowledge points to chapter themes
+-- Knowledge-Chapter Links: Maps knowledge points to chapter themes (Legacy)
 CREATE TABLE IF NOT EXISTS knowledge_chapter_links (
     knowledge_id VARCHAR,
     chapter_tag VARCHAR,         -- Agent-generated theme tag (e.g., "structural_motifs", "dynamics")
     relevance_score FLOAT,
     PRIMARY KEY (knowledge_id, chapter_tag)
+);
+
+-- Summaries Table: Stores structured paper summaries (Background + Contribution)
+CREATE TABLE IF NOT EXISTS summaries (
+    summary_id VARCHAR PRIMARY KEY,
+    paper_id VARCHAR,
+    background_summary TEXT,
+    contribution_summary TEXT,
+    found_references TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Paper-Chapter Links: Maps papers to chapter themes
+CREATE TABLE IF NOT EXISTS paper_chapter_links (
+    paper_id VARCHAR,
+    chapter_tag VARCHAR,
+    relevance_score FLOAT,
+    PRIMARY KEY (paper_id, chapter_tag)
 );

@@ -1,5 +1,5 @@
 """
-Batch Processor (v14.3) - Bundles extraction/writing tasks for minimal agent intervention.
+Batch Processor (v16.1) - Bundles extraction/writing tasks for minimal agent intervention.
 Creates "bundles" of prompts that the agent processes with a single Task call per bundle.
 
 Usage:
@@ -10,11 +10,19 @@ Usage:
 """
 
 import os, json, re, sys, hashlib
+
+# Fix UTF-8 encoding for Windows
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
 from pathlib import Path
 from typing import List, Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import duckdb
+from pipeline_state import get_next_action, load_workspace_state, recommended_command
 
 def create_extraction_bundles(db_path: str, output_dir: str, bundle_size: int = 15):
     """Bundle extraction prompts into groups of bundle_size for batch processing."""
@@ -22,12 +30,13 @@ def create_extraction_bundles(db_path: str, output_dir: str, bundle_size: int = 
     
     conn = duckdb.connect(db_path)
     papers = conn.execute("""
-        SELECT p.paper_id, p.title, p.abstract, p.year, p.journal, p.referenced_works_json
+        SELECT p.paper_id, p.title, p.abstract, p.year, p.journal, 
+               p.referenced_works_json, p.fulltext_status, p.fulltext_path
         FROM papers p
         WHERE p.screening_status = 'include' 
-        AND p.abstract IS NOT NULL AND p.abstract != ''
-        AND p.paper_id NOT IN (SELECT DISTINCT paper_id FROM knowledge)
-        ORDER BY p.citation_count DESC NULLS LAST
+        AND (p.abstract IS NOT NULL AND p.abstract != '' OR p.fulltext_status = 'fetched')
+        AND p.paper_id NOT IN (SELECT DISTINCT paper_id FROM summaries)
+        ORDER BY p.fulltext_status DESC, p.citation_count DESC NULLS LAST
     """).fetchall()
     conn.close()
     
@@ -39,16 +48,39 @@ def create_extraction_bundles(db_path: str, output_dir: str, bundle_size: int = 
     for i in range(0, len(papers), bundle_size):
         batch = papers[i:i+bundle_size]
         bundle_papers = []
-        for pid, title, abstract, year, journal, ref_json in batch:
+        for pid, title, abstract, year, journal, ref_json, ft_status, ft_path in batch:
             refs = json.loads(ref_json) if ref_json else []
             ref_list = "\n".join([f"  - {r}" for r in refs[:10]])
+            
+            # Get full text excerpt if available
+            fulltext_excerpt = ""
+            if ft_status == 'fetched' and ft_path and os.path.exists(ft_path):
+                try:
+                    if ft_path.endswith('.html'):
+                        with open(ft_path, 'r', encoding='utf-8') as f:
+                            raw_html = f.read()
+                        clean = re.sub(r'<[^>]+>', ' ', raw_html)
+                        clean = re.sub(r'\s+', ' ', clean)
+                        fulltext_excerpt = clean[:8000]  # First 8000 chars
+                    elif ft_path.endswith('.pdf'):
+                        try:
+                            from universal_parser import parse_everything
+                            parsed = parse_everything(ft_path)
+                            fulltext_excerpt = parsed.get('text', '')[:8000]
+                        except:
+                            pass  # PDF parsing failed
+                except:
+                    pass  # Full text read failed
+            
             bundle_papers.append({
                 "paper_id": pid,
                 "title": title or "",
                 "abstract": abstract or "",
                 "year": year,
                 "journal": journal or "",
-                "references": ref_list
+                "references": ref_list,
+                "has_fulltext": ft_status == 'fetched',
+                "fulltext_excerpt": fulltext_excerpt
             })
         
         bundle_id = f"bundle_{i//bundle_size + 1:03d}"
@@ -81,38 +113,93 @@ def create_extraction_bundles(db_path: str, output_dir: str, bundle_size: int = 
 
 
 def create_single_extraction_prompt(papers_bundle: List[Dict]) -> str:
-    """Create a single prompt for extracting knowledge from a bundle of papers."""
+    """Create a single prompt for extracting structured summaries from a bundle of papers."""
     papers_text = ""
     for i, p in enumerate(papers_bundle, 1):
+        content_section = ""
+        if p.get('fulltext_excerpt'):
+            content_section = f"""
+FULL TEXT EXCERPT (first 8000 chars):
+{p['fulltext_excerpt']}
+
+ABSTRACT (for reference):
+{p['abstract']}"""
+        else:
+            content_section = f"""
+ABSTRACT:
+{p['abstract']}"""
+        
         papers_text += f"""
 --- PAPER {i} ---
 ID: {p['paper_id']}
 TITLE: {p['title']}
 YEAR: {p['year']}
 JOURNAL: {p['journal']}
-ABSTRACT:
-{p['abstract']}
+{content_section}
 
 REFERENCES:
 {p['references']}
 """
     
-    prompt = f"""You are a scientific knowledge extraction agent. Extract ALL distinct scientific knowledge points from the following {len(papers_bundle)} papers.
+    prompt = f"""You are a scientific research assistant. Extract structured summaries from the following {len(papers_bundle)} papers for use in writing a literature review.
 
-For EACH paper, extract 3-10 knowledge points. For EACH knowledge point, output a JSON object with these fields:
+For EACH paper, provide a summary consisting of three distinct parts:
+
+1. BACKGROUND KNOWLEDGE summary: 
+   - Focus on foundational concepts and existing research context mentioned in the Introduction. 
+   - IMPORTANT: When mentioning previous work, indicate the citation by putting the title of the cited paper in parentheses, e.g., (Original Title of Cited Work).
+
+2. PAPER CONTRIBUTION summary:
+   - Clearly explain what THIS specific paper did.
+   - Include: key experiments, important parameters, major results, significant data points, and the overall significance/impact of the findings.
+
+3. IMPORTANT REFERENCES:
+   - Identify 2-5 papers cited in this work that seem foundational or highly relevant to the review topic.
+   - Provide the EXACT TITLE of the cited paper and a brief reason why it should be reviewed.
+
+Output as a JSON array of objects, one for each paper:
 - paper_id: The paper's ID
-- knowledge_text: The precise scientific statement
-- knowledge_type: One of [mechanism, result, method, limitation, structural, design, interaction, finding, hypothesis, comparison]
-- source_type: "original" (this paper's new finding) | "referenced" (reporting someone else's work) | "unknown"
-- original_reference_id: paper_id if original; reference if referenced; "unknown" if unclear
-- confidence_score: 0.0-1.0
+- background_summary: The background knowledge summary string.
+- contribution_summary: The paper contribution summary string.
+- important_references: A list of objects with "title" and "reason"
 
-Output as a JSON array of objects. Be precise, technical, and avoid redundancy.
+Be precise, technical, and ensure all important scientific data and context are captured.
 
 PAPERS:
 {papers_text}
 
 Output the JSON array now:"""
+    return prompt
+    return prompt
+
+
+def create_screening_prompt(bundle: List[Dict]) -> str:
+    """Generate a prompt for LLM-based abstract screening."""
+    prompt = f"""You are a senior scientific editor. Review the following {len(bundle)} papers and decide if they should be included in a systematic review.
+
+The review topic is: {bundle[0].get('topic', 'Search Results')}
+
+For EACH paper, output:
+1. "decision": "include" (highly relevant and high quality), "exclude" (out of scope, low quality, or duplicate), or "maybe" (potentially relevant but abstract is vague).
+2. "reason": A one-sentence explanation for the decision.
+3. "needs_fulltext": true/false. Set to true if this paper likely contains key experimental data, protocols, or foundational theory that requires deep reading of the full text.
+
+JSON output format:
+[
+  {{
+    "paper_id": "...",
+    "title": "...",
+    "decision": "include",
+    "reason": "...",
+    "needs_fulltext": true
+  }}
+]
+
+PAPERS TO SCREEN:
+"""
+    for p in bundle:
+        prompt += f"\nID: {p['paper_id']}\nTITLE: {p['title']}\nABSTRACT: {p.get('abstract', 'No abstract available')}\n---\n"
+    
     return prompt
 
 
@@ -133,42 +220,29 @@ def create_writing_bundles(db_path: str, blueprint_path: str, sections_dir: str,
         ch_tag = ch.get("tag", "")
         themes = ch.get("themes", [])
         
-        # Get knowledge for this chapter
-        knowledge_ids = ch.get("knowledge_ids", [])
-        
-        # Also get knowledge via chapter_tag links
+        # Get summaries for this chapter via paper_chapter_links
         if ch_tag:
-            tagged = conn.execute("""
-                SELECT k.knowledge_id, k.knowledge_text, k.knowledge_type, 
-                       k.source_type, k.original_reference_id, k.paper_id, p.title, p.year
-                FROM knowledge k
-                JOIN papers p ON k.paper_id = p.paper_id
-                JOIN knowledge_chapter_links kcl ON k.knowledge_id = kcl.knowledge_id
-                WHERE kcl.chapter_tag = ?
-                ORDER BY kcl.relevance_score DESC, p.citation_count DESC NULLS LAST
+            summary_rows = conn.execute("""
+                SELECT s.background_summary, s.contribution_summary, p.title, p.year, p.paper_id, p.abstract
+                FROM summaries s
+                JOIN papers p ON s.paper_id = p.paper_id
+                JOIN paper_chapter_links pcl ON s.paper_id = pcl.paper_id
+                WHERE pcl.chapter_tag = ?
+                ORDER BY pcl.relevance_score DESC, p.citation_count DESC NULLS LAST
             """, [ch_tag]).fetchall()
-            for row in tagged:
-                if row[0] not in knowledge_ids:
-                    knowledge_ids.append(row[0])
-        
-        # Get knowledge texts
-        if knowledge_ids:
-            placeholders = ','.join(['?'] * len(knowledge_ids))
-            kn_rows = conn.execute(f"""
-                SELECT k.knowledge_text, k.knowledge_type, k.source_type, 
-                       k.original_reference_id, p.title, p.year
-                FROM knowledge k
-                JOIN papers p ON k.paper_id = p.paper_id
-                WHERE k.knowledge_id IN ({placeholders})
-                ORDER BY p.citation_count DESC NULLS LAST
-            """, knowledge_ids).fetchall()
         else:
-            kn_rows = []
+            summary_rows = []
         
-        knowledge_block = "\n".join([
-            f"[{kt}|{st}] {text}\n  Source: {orig_ref} | {title[:60]} ({year})"
-            for text, kt, st, orig_ref, title, year in kn_rows
-        ])
+        summary_block = ""
+        for idx, row in enumerate(summary_rows, 1):
+            bg, contrib, title, year, pid, abstract = row
+            summary_block += (
+                f"\n--- PAPER {idx}: {title} ({year}) [ID: {pid}] ---\n"
+                f"ABSTRACT: {abstract[:500]}...\n"
+                f"BACKGROUND KNOWLEDGE: {bg}\n"
+                f"CONTRIBUTION: {contrib}\n"
+                f"CITE_AS: \\cite{{{pid}}}\n"
+            )
         
         # Get previous chapter summaries
         prev_summaries = []
@@ -197,8 +271,8 @@ def create_writing_bundles(db_path: str, blueprint_path: str, sections_dir: str,
             "chapter_title": ch_title,
             "chapter_tag": ch_tag,
             "themes": themes_text,
-            "knowledge_block": knowledge_block,
-            "knowledge_count": len(kn_rows),
+            "summary_block": summary_block,
+            "paper_count": len(summary_rows),
             "previous_summaries": "\n\n".join(prev_summaries),
             "global_outline": global_outline,
             "total_chapters": len(chapters)
@@ -225,87 +299,71 @@ def create_writing_bundles(db_path: str, blueprint_path: str, sections_dir: str,
 
 
 def generate_writing_prompt(bundle: Dict) -> str:
-    """Generate the mega-prompt for writing a chapter."""
-    return f"""Write Chapter {bundle['chapter_number']} of a Nature Reviews-style paper.
+    """Generate the mega-prompt for writing a chapter based on paper summaries."""
+    paper_count = int(bundle['paper_count'])
+    summary_block = bundle['summary_block']
+    
+    source_instruction = ""
+    if paper_count > 0:
+        source_instruction = summary_block
+    else:
+        source_instruction = (
+            "⚠️ NO PAPERS linked to this chapter in the database. "
+            "You MUST perform a search for relevant papers in the workspace "
+            "BEFORE writing."
+        )
+
+    return f"""Write Chapter {bundle['chapter_number']} of a high-impact Nature Reviews-style paper.
 
 TITLE: "{bundle['chapter_title']}"
-Position: Chapter {bundle['chapter_number']} of {bundle['total_chapters']}.
+POSITION: Chapter {bundle['chapter_number']} of {bundle['total_chapters']}.
 
 GLOBAL OUTLINE:
 {bundle['global_outline']}
 
 CONTEXT FROM PREVIOUS CHAPTERS:
-{bundle['previous_summaries'] if bundle['previous_summaries'] else "This is Chapter 1. Establish the foundational concepts."}
+{bundle['previous_summaries'] if bundle['previous_summaries'] else "This is Chapter 1. Establish the foundational concepts and the scope of the review."}
 
-THEMES TO COVER:
-{bundle['themes']}
+PAPER SUMMARIES AND ABSTRACTS ({paper_count} papers - SYNTHESIZE THESE):
+{source_instruction}
 
-KNOWLEDGE BLOCK ({bundle['knowledge_count']} points - cite as \\cite{{W...}} or \\cite{{paper_id}}):
-{bundle['knowledge_block']}
+═══════════════════════════════════════════════
+WRITING INSTRUCTIONS (FOLLOW STRICTLY):
+═══════════════════════════════════════════════
 
-REQUIREMENTS:
-- LaTeX format: \\section{{}} for the chapter, \\subsection{{}} for each theme
-- MINIMUM 2000 words (aim for 2500-3000)
-- Flowing narrative paragraphs, NOT bullet lists or numbered lists
-- Each subsection: 3-5 substantial paragraphs that build logically
-- Cite knowledge points using \\cite{{original_reference_id}}
-- Connect themes with transitional sentences
-- Reference concepts from previous chapters where relevant
-- Do NOT include \\documentclass or \\begin{{document}}
+1. STRUCTURE: Write ONE \\section{{}} with the chapter title. Then create 3-5 \\subsection{{}} 
+   that THEMATICALLY GROUP the knowledge points. DO NOT create one subsection per knowledge point.
+   YOU decide the subsection titles based on the themes you see in the knowledge block.
 
-Write the COMPLETE chapter now."""
+2. CITATION FORMAT (CRITICAL):
+   Each paper in the block above shows a CITE_AS field (e.g., \\cite{{paper_id}}). 
+   When you use information from a paper, you MUST include its CITE_AS in your sentence.
+   Example: "Prior studies have established that... \\cite{{W1234567890}}."
+   Every paragraph must contain at least 2-3 citations. NO unsourced claims.
+
+3. DEPTH: Minimum 2500 words. Aim for 3000+ words.
+   Each subsection: 5-8 substantial paragraphs.
+
+4. NARRATIVE: Flowing academic prose. No bullet points or lists.
+   Use transitional sentences between subsections.
+
+5. SYNTHESIS: Compare and contrast findings from different papers.
+   Show how knowledge points relate to each other.
+
+6. LATEX: Only use \\section{{}}, \\subsection{{}}, \\cite{{}}. 
+   No \\documentclass, \\begin{{document}}, or \\bibliography.
+
+Begin writing the complete chapter now."""
 
 
 def generate_commands(workspace: str):
     """Generate the agent_commands.sh file with step-by-step instructions."""
     db_path = os.path.join(workspace, "db", "review.duckdb")
-    data_dir = os.path.join(workspace, "data")
-    outputs_dir = os.path.join(workspace, "outputs")
-    sections_dir = os.path.join(outputs_dir, "sections")
-    extraction_dir = os.path.join(data_dir, "extraction_bundles")
-    writing_dir = os.path.join(data_dir, "writing_bundles")
-    
-    conn = duckdb.connect(db_path)
-    papers = conn.execute("SELECT COUNT(*) FROM papers WHERE screening_status='include' AND abstract IS NOT NULL AND abstract != ''").fetchone()[0]
-    knowledge = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
-    chapters = len([f for f in os.listdir(sections_dir) if re.match(r'sec\d+\.tex', f)]) if os.path.exists(sections_dir) else 0
-    conn.close()
-    
-    blueprint_path = os.path.join(outputs_dir, "blueprint.json")
-    has_blueprint = os.path.exists(blueprint_path)
-    
+    state = load_workspace_state(db_path)
+    next_action = get_next_action(state)
     lines = ["#!/bin/bash", "# Auto-generated agent commands for review pipeline", f"# Workspace: {workspace}", ""]
-    
-    # Determine current state
-    if knowledge < papers * 2:
-        # Need extraction
-        n_bundles = create_extraction_bundles(db_path, extraction_dir, bundle_size=10)
-        lines.append(f"# STEP 3: Extract knowledge ({papers - knowledge//3} papers remaining, {n_bundles} bundles)")
-        lines.append(f"# Process each bundle by reading the JSON and sending to Task agent")
-        lines.append(f"echo 'Extraction bundles in: {extraction_dir}'")
-        lines.append(f"echo 'Process each bundle_X.json file with a Task call'")
-        lines.append("")
-    elif not has_blueprint:
-        # Need architecture
-        lines.append("# STEP 4: Design architecture")
-        lines.append(f"python3 scripts/design_architecture.py --db-path {db_path} --output-dir {outputs_dir} --summary-only")
-        lines.append(f"echo 'Read the knowledge summary above and design chapter structure'")
-        lines.append(f"echo 'Save blueprint to {blueprint_path}'")
-        lines.append("")
-    elif chapters < len(json.load(open(blueprint_path)).get("chapters", [])):
-        # Need writing
-        remaining = [ch for ch in json.load(open(blueprint_path)).get("chapters", []) 
-                     if ch["number"] > chapters]
-        n_bundles = create_writing_bundles(db_path, blueprint_path, sections_dir, writing_dir)
-        lines.append(f"# STEP 5: Write chapters ({len(remaining)} remaining, {n_bundles} bundles)")
-        lines.append(f"echo 'Writing bundles in: {writing_dir}'")
-        lines.append(f"echo 'Process each chapter_X.json file with a Task call'")
-        lines.append("")
-    else:
-        # Need render
-        lines.append("# STEP 6: Render")
-        lines.append(f"python3 scripts/pipeline_runner.py --next")
-        lines.append("")
+    lines.append(f"# Next action: {next_action}")
+    lines.append(recommended_command(next_action, state))
     
     cmd_path = os.path.join(workspace, "agent_commands.sh")
     with open(cmd_path, 'w') as f:
@@ -326,7 +384,7 @@ if __name__ == "__main__":
     parser.add_argument("--create-writing-bundles", action="store_true")
     parser.add_argument("--blueprint", help="Path to blueprint.json")
     parser.add_argument("--sections-dir", help="Path to sections directory")
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--output-dir")
     parser.add_argument("--bundle-size", type=int, default=10)
     parser.add_argument("--generate-commands", action="store_true")
     parser.add_argument("--workspace", help="Workspace path for generate-commands")
@@ -347,9 +405,13 @@ if __name__ == "__main__":
         print(prompt)
     
     elif args.create_extraction_bundles:
+        if not args.output_dir:
+            parser.error("--output-dir is required with --create-extraction-bundles")
         create_extraction_bundles(args.db_path, args.output_dir, args.bundle_size)
     
     elif args.create_writing_bundles:
+        if not args.output_dir:
+            parser.error("--output-dir is required with --create-writing-bundles")
         create_writing_bundles(args.db_path, args.blueprint, args.sections_dir, args.output_dir)
     
     elif args.generate_commands:

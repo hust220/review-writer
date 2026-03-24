@@ -1,15 +1,22 @@
 """
-Metadata and OA Fetcher: Handles paper search and OA PDF/HTML retrieval.
-Prioritizes OpenAlex + Unpaywall for direct access.
-Contains native OpenAlex search and ingestion logic.
+Core Search and Metadata Module for UniversalReviewer.
+Handles OpenAlex search and Unpaywall metadata retrieval.
 """
 
 import requests
 import logging
 import time
 import os
+import sys
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
+
+# Fix UTF-8 encoding for Windows
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,10 +34,11 @@ class OpenAlexSearcher:
         self.email = email
 
     def search(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Search OpenAlex using the powerful filter syntax."""
+        """Search OpenAlex using the filter syntax."""
         params = {
-            "filter": f"title_and_abstract.search:{query},has_doi:true",
+            "filter": f"title_and_abstract.search:{query},type:article|preprint",
             "per_page": limit,
+            "sort": "cited_by_count:desc",
             "mailto": self.email
         }
         try:
@@ -43,15 +51,6 @@ class OpenAlexSearcher:
         except Exception as e:
             logger.error(f"OpenAlex request error: {e}")
         return []
-
-    def extract_biblio(self, work: Dict) -> Dict[str, str]:
-        """Extract bibliographic details for BibTeX."""
-        bib = work.get('biblio', {})
-        return {
-            'volume': bib.get('volume', ''),
-            'issue': bib.get('issue', ''),
-            'pages': f"{bib.get('first_page', '')}-{bib.get('last_page', '')}" if bib.get('first_page') else ''
-        }
 
     def reconstruct_abstract(self, inverted_index: Optional[Dict]) -> str:
         """Reconstruct abstract from inverted index."""
@@ -71,9 +70,7 @@ class OpenAlexSearcher:
         """Fetch metadata for multiple OpenAlex IDs."""
         if not ids: return []
         
-        # OpenAlex allows searching multiple IDs using '|'
         all_results = []
-        # Max per_page is 200, but we use 50 for safety with ID lists
         batch_size = 50
         for i in range(0, len(ids), batch_size):
             batch = ids[i:i+batch_size]
@@ -84,7 +81,6 @@ class OpenAlexSearcher:
                 "mailto": self.email
             }
             try:
-                # Add delay to avoid 429
                 time.sleep(0.5)
                 resp = requests.get(self.BASE_URL, params=params, timeout=30)
                 if resp.status_code == 200:
@@ -93,8 +89,17 @@ class OpenAlexSearcher:
                 logger.error(f"Error fetching batch of IDs: {e}")
         return all_results
 
+    def extract_biblio(self, work: Dict) -> Dict[str, str]:
+        """Extract bibliographic details."""
+        bib = work.get('biblio', {})
+        return {
+            'volume': bib.get('volume', ''),
+            'issue': bib.get('issue', ''),
+            'pages': f"{bib.get('first_page', '')}-{bib.get('last_page', '')}" if bib.get('first_page') else ''
+        }
+
 def get_oa_link(doi: str, email: str = "jianopt@gmail.com") -> Optional[OAResult]:
-    """Check Unpaywall for the best OA link (PDF preferred)."""
+    """Check Unpaywall for the best OA link."""
     if not doi: return None
     
     url = f"https://api.unpaywall.org/v2/{doi}?email={email}"
@@ -122,7 +127,6 @@ def download_file(url: str, output_path: str) -> bool:
         headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
         resp = requests.get(url, headers=headers, timeout=30, stream=True)
         if resp.status_code == 200:
-            # Ensure directory exists
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             with open(output_path, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):

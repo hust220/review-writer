@@ -15,17 +15,16 @@ Evaluate a set of research papers based on their titles and abstracts. Determine
 - **0.0 - 0.3 (Exclude)**: Irrelevant discipline, low-quality source, or unrelated focus.
 
 ## Output (JSON Format)
-Return a list of screening results:
+Return a JSON array of objects:
 ```json
 [
   {
-    "paper_id": "W12345",
-    "score": 0.95,
+    "paper_id": "W123456",
+    "title": "Short Title",
     "decision": "include",
-    "reason": "Directly addresses the impact of X on Y using a novel Z approach.",
-    "assigned_topics": ["Historical evolution", "Neural paradigms"]
-  },
-  ...
+    "reason": "Directly addresses the core topic using a novel approach.",
+    "needs_fulltext": true
+  }
 ]
 ```
 Do not include any text outside the JSON block.

@@ -1,23 +1,50 @@
-# UniversalReviewer (v9.0 "Iron-Clad")
+# UniversalReviewer
 
-UniversalReviewer is an elite autonomous agentic workflow for creating high-impact academic literature reviews. It transforms a simple research prompt into a professional, Nature-style LaTeX/PDF document with 150+ citations.
+UniversalReviewer is a staged review-writing pipeline for building a literature corpus, extracting structured evidence, and producing chapter-writing context inside a dedicated workspace.
 
-## Key Features
-- **Zero-Config Autonomy**: Just provide a topic, the skill handles workspace management, recursive discovery, and deep synthesis.
-- **150+ Citation Target**: Uses 2-round citation snowballing and mass evidence harvesting to ensure extreme depth.
-- **Iron-Clad Reliability**: Features automatic BibTeX reconciliation, LaTeX character cleaning, and math package integration (amsmath/amssymb).
-- **Deep Modular Synthesis**: Employs a two-stage writing process (Draft + Expand) to ensure long-form, data-rich chapters.
-- **AI Figure Prompts**: Automatically generates high-fidelity prompts for scientific figure generation.
+## What Changed
 
-## Project Structure
-- `SKILL.md`: The core autonomous protocol.
-- `agents/`: The multi-agent system (Researcher, Curator, Extractor, Expander, Writer, Editor, Visualizer).
-- `scripts/`: The data engine (Search, Fetch, Parse, Clean, BibGen, Render).
+This version makes the OpenAlex acquisition path explicit and enforceable:
+
+- `step0b_queries.py` generates the required `outputs/search_queries.json`
+- `step_status.py` reports the current stage and next command
+- `run_pipeline.py` executes the next valid non-agent step
+- stage guards block out-of-order execution
 
 ## Quick Start
-1.  Ensure you have `tectonic` and `playwright` installed on your system.
-2.  Input: *"Write a review on [Your Topic]."*
-3.  The system will automatically create a folder in `workspaces/` and start the Iron-Clad pipeline.
 
----
-*Autonomous Academic Excellence.*
+1. Initialize a workspace:
+
+```bash
+python scripts/step0_init.py --prompt "your topic"
+```
+
+2. Generate OpenAlex queries:
+
+```bash
+python scripts/step0b_queries.py --workspace workspaces/<project_slug>
+```
+
+3. Acquire initial candidates from OpenAlex:
+
+```bash
+python scripts/step1_acquire.py --db-path workspaces/<project_slug>/db/review.duckdb --queries-json workspaces/<project_slug>/outputs/search_queries.json
+```
+
+4. Check the next valid stage at any time:
+
+```bash
+python scripts/step_status.py --db-path workspaces/<project_slug>/db/review.duckdb
+```
+
+Or let the helper run the next valid scripted step:
+
+```bash
+python scripts/run_pipeline.py --db-path workspaces/<project_slug>/db/review.duckdb --step next
+```
+
+## Notes
+
+- Screening, extraction, blueprint design, and final chapter drafting still require the corresponding agents.
+- The pipeline is workspace-scoped. Generated files should stay under `workspaces/<project_slug>/`.
+- If OpenAlex acquisition is blocked, stop and report the blocker. Do not replace it with direct manual writing.

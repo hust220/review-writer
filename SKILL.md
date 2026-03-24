@@ -1,161 +1,269 @@
 ---
 name: universal-reviewer
-version: "14.5.0"
-description: Zero-touch autonomous review engine. One command → PDF. Agent auto-executes all checkpoints. UVA login is the only manual step.
+version: "20.0.0"
+description: Agent-driven review pipeline with explicit OpenAlex acquisition, stage guards, and workspace-scoped outputs.
 ---
 
-# UniversalReviewer (v14.5) - Zero-Touch Autonomous Review
+# UniversalReviewer (v21.0)
 
-## THE ONE COMMAND
+UniversalReviewer is a workspace-scoped literature review pipeline for end-to-end review generation. It is not an open-ended writing assistant. The default behavior must follow the staged SOP below and must stay aligned with the real script interfaces.
 
-When a user asks you to write a review, run this:
+## Core Rules
+
+The pipeline must begin with deterministic OpenAlex acquisition.
+
+- Do not skip `step0b_queries.py`.
+- Do not skip `step1_acquire.py`.
+- Do not start screening, writing, or freeform literature collection before OpenAlex candidates exist in the database.
+- If acquisition is blocked by network or dependencies, report the blocker explicitly and request approval when needed. Do not replace it with manual writing.
+- The initial OpenAlex pass is mandatory, but it is not always sufficient for narrow intersection topics.
+- For pairwise or mechanism-focused topics such as `A + B in disease X`, the pipeline must run a corpus adequacy check after the first acquisition round and may generate a second targeted OpenAlex bundle for bridge and mechanism papers.
+
+## Workspace Rule
+
+All generated project files must stay inside:
+
+`workspaces/<project_slug>/`
+
+Expected directories:
+
+- `db/`
+- `data/query_bundles/`
+- `data/fulltext/`
+- `data/extraction_prompts/`
+- `data/writing_contexts/`
+- `outputs/`
+- `outputs/sections/`
+
+Always prefer running scripts with the workspace as the working directory. If a script writes outside the workspace because of `cwd`-relative defaults, treat that as a bug and correct it rather than accepting the leak.
+
+## Topic Shapes
+
+Use the topic form to choose retrieval behavior after the mandatory first pass.
+
+- `Broad review`: single domain or field summary. Usually one OpenAlex pass is enough before screening.
+- `Narrow mechanism review`: pathway, molecule, compartment, or process within a disease. Expect targeted bridge queries.
+- `Intersection review`: explicit `A and B in X` or `A-B-X` question. Expect many papers on `A` alone and `B` alone; direct bridge retrieval is usually required.
+
+## Corpus Adequacy Check
+
+After the first OpenAlex acquisition round, inspect the candidate pool before treating it as sufficient.
+
+Trigger a targeted second-pass OpenAlex bundle when any of these are true:
+
+- the topic is an explicit pairwise or intersection prompt
+- the pool contains many papers on each anchor separately but very few direct bridge papers
+- the first-pass hits are dominated by broad disease reviews or tangential biomarker papers
+- the user asked for mechanistic association rather than a generic topic summary
+
+For the targeted second pass:
+
+- generate a second query bundle with `step0b_queries.py --strategy bridge`
+- keep the first pass intact; do not replace `outputs/search_queries.json`
+- save bridge queries inside the same workspace and ingest them additively
+- prefer query patterns like `A B disease`, `A B mechanism`, `A B amyloid beta`, `A B lipid raft`, `A B transport`, and `A B review`
+
+## Two-Corpus Model
+
+UniversalReviewer should build two related corpora before final writing:
+
+- `primary corpus`: included papers used for screening, full-text fetch, extraction, and core evidence synthesis
+- `citation corpus`: metadata-complete papers used for citation density, historical framing, and background support even when they are not full-text extracted
+
+Citation papers must be ingested into the database with `paper_role = 'citation'`. They are valid for `\cite{...}` in the final review and must appear in generated BibTeX, but they do not count toward primary include/full-text/extraction quotas.
+
+## Required Execution Order
+
+### Step 0: Initialize workspace
 
 ```bash
-python3 scripts/pipeline_runner.py --prompt "user's topic here" --full-auto
+python scripts/step0_init.py --prompt "your topic"
 ```
 
-## CORE MANDATE - READ THIS FIRST
+Creates the workspace, DuckDB database, and standard directory structure.
 
-**You are an autonomous agent. You MUST execute the ENTIRE pipeline without asking the user for permission or input.**
+### Step 0b: Generate OpenAlex queries
 
-When `pipeline_runner.py` prints a CHECKPOINT, it gives you STEP A, STEP B, STEP C commands. You MUST:
-
-1. **Read the commands** from the terminal output
-2. **Execute Step A** (get the prompt)
-3. **Execute Step B** (send prompt to Task agent)
-4. **Save the Task output** to a temp JSON file
-5. **Execute Step C** (save to database)
-6. **Repeat** for all bundles/chapters
-7. **Execute the final command** (`python3 pipeline_runner.py --next`)
-
-**NEVER stop and ask "should I continue?" or "what next?".** Just do it.
-
-## FULL AUTONOMOUS WORKFLOW
-
-### Phase 1: Bootstrap (Automatic)
-```
-python3 pipeline_runner.py --prompt "topic" --full-auto
-```
-This runs steps 0-2 automatically (search, snowball, env check).
-
-### Phase 2: Knowledge Extraction (YOU execute automatically)
-
-When the pipeline stops at `CHECKPOINT: extract_knowledge`, you see commands like:
-
-```
---- bundle_001.json ---
-Step A: python3 scripts/batch_processor.py --db-path <db> --type extract --bundle <file> --output-dir <dir>
-Step B: Send the prompt to Task agent
-Step C: python3 scripts/extract_knowledge.py --db-path <db> --save-json <output.json>
-```
-
-**YOUR ACTION (do this automatically, no user permission needed):**
-
-```python
-# For EACH bundle, do this loop automatically:
-import subprocess, json, tempfile
-
-# 1. Run Step A to get the prompt
-result = subprocess.run(["python3", "scripts/batch_processor.py", "--db-path", db_path, "--type", "extract", "--bundle", bundle_file, "--output-dir", bundles_dir], capture_output=True, text=True)
-prompt = result.stdout
-
-# 2. Send to Task agent (you do this with the Task tool)
-# The Task agent returns a JSON array of knowledge objects
-
-# 3. Save to temp file and run Step C
-with open("/tmp/knowledge_result.json", "w") as f:
-    json.dump(task_result, f)
-subprocess.run(["python3", "scripts/extract_knowledge.py", "--db-path", db_path, "--save-json", "/tmp/knowledge_result.json"])
-```
-
-After ALL bundles processed, run:
-```
-python3 pipeline_runner.py --next
-```
-
-### Phase 3: Architecture Design (YOU execute automatically)
-
-When the pipeline stops at `CHECKPOINT: design_architecture`:
-
-**YOUR ACTION:**
 ```bash
-# 1. Get knowledge summary
-python3 scripts/design_architecture.py --db-path <db> --output-dir <dir> --summary-only
-
-# 2. Read the summary, design chapters with Task agent
-# Task agent returns a blueprint JSON
-
-# 3. Save blueprint
-python3 scripts/design_architecture.py --db-path <db> --output-dir <dir> --save-blueprint /tmp/blueprint.json
-
-# 4. Continue
-python3 pipeline_runner.py --next
+python scripts/step0b_queries.py --workspace workspaces/<project_slug>
 ```
 
-### Phase 4: Chapter Writing (YOU execute automatically)
+Required outputs:
 
-When the pipeline stops at `CHECKPOINT: write_chapters`:
+- `outputs/search_queries.json`
+- `data/query_bundles/refinement_prompt.txt`
 
-**YOUR ACTION:**
+This step is mandatory. `step1_acquire.py` must consume this query file.
+
+For narrow intersection topics, a second targeted bundle is allowed and expected after the first acquisition round:
+
 ```bash
-# For EACH chapter, do this loop automatically:
-
-# 1. Get writing prompt
-python3 scripts/batch_processor.py --db-path <db> --type write --bundle <chapter_X.json> --output-dir <dir>
-
-# 2. Send prompt to Task agent → get LaTeX output
-
-# 3. Save chapter
-echo "<task_latex_output>" > outputs/sections/sec<N>.tex
+python scripts/step0b_queries.py --workspace workspaces/<project_slug> --strategy bridge
+python scripts/step1_acquire.py --db-path <db> --queries-json <workspace>/outputs/search_queries_bridge.json
 ```
 
-After ALL chapters written, run:
-```
-python3 pipeline_runner.py --next
-```
+### Step 1: Acquire metadata from OpenAlex
 
-### Phase 5: Render (Automatic)
-
-```
-Pipeline renders PDF automatically. You just report the result.
+```bash
+python scripts/step1_acquire.py --db-path <db> --queries-json <workspace>/outputs/search_queries.json
 ```
 
-## WHAT TO TELL THE USER
+This is the only supported initial acquisition path.
 
-After running the initial command, tell the user:
+### Step 2: Screen abstracts
+
+```bash
+python scripts/step2_screen.py --db-path <db> --create-bundles --output-dir <workspace>/data/screening_bundles --topic "your topic"
 ```
-"I'm generating your review. This will take several minutes. 
-I'll handle all the extraction, design, and writing automatically.
-You'll see the PDF when it's ready."
+
+Then use `agents/screener.md` and apply results with:
+
+```bash
+python scripts/step2_screen.py --db-path <db> --apply-json <decisions.json>
 ```
 
-Then execute the ENTIRE pipeline autonomously. Only report back when:
-- The PDF is generated (success)
-- UVA login is needed (ask user to complete browser login)
-- A critical error occurs
+Screening does not need to clear the entire pending pool before later stages can start. Once a credible included seed set exists, fetch/extract/design/write may proceed while remaining pending papers are screened later.
 
-## EXCEPTIONS (when to ask user)
+Prioritize `include` decisions for:
 
-1. **UVA Login Required**: Cookie expired → ask user to complete browser login
-2. **Critical Error**: API down, database corrupt → report and ask for guidance
-3. **PDF Render Failure**: Report the error and suggest fix
+- foundational genetics or epidemiology papers
+- direct bridge papers connecting both sides of the topic
+- mechanism-heavy reviews with high synthesis value
+- human tissue, in vivo, or translational papers over tangential single-factor hits
 
-## DATABASE
+If both a preprint and a peer-reviewed version of the same work are present, prefer the peer-reviewed version.
 
-| Table | Purpose |
-|---|---|
-| `papers` | 150+ papers with metadata |
-| `knowledge` | Extracted knowledge with `source_type` |
-| `reference_stubs` | Referenced papers not in main collection |
-| `knowledge_chapter_links` | Maps knowledge to chapters |
+### Step 3: Expand iteratively
 
-## KEY FILES
+Use one or both of:
 
-| File | Purpose |
-|---|---|
-| `pipeline_runner.py` | Master orchestrator |
-| `batch_processor.py` | Bundle creator and prompt generator |
-| `extract_knowledge.py` | Knowledge CLI (--save-json) |
-| `design_architecture.py` | Architecture CLI (--save-blueprint) |
-| `write_chapters.py` | Chapter writing helpers |
-| `manager.py` | Snowball, render |
+```bash
+python scripts/step3_snowball.py --db-path <db> --auto
+python scripts/step3b_references.py --db-path <db>
+```
+
+After each expansion round, return to Step 2.
+
+Use the two expansion modes differently:
+
+- `step3_snowball.py`: expand the primary candidate pool from included papers
+- `step3b_references.py`: build the citation corpus from extracted reference suggestions and title-level background mentions
+
+`step3b_references.py` should usually be run after extraction and before final design/writing when the review target is a long-form synthesis.
+
+### Step 4: Fetch full text
+
+```bash
+python scripts/step4_fetch.py --db-path <db> --output-dir <workspace>/data/fulltext
+```
+
+Only valid after at least one paper is marked `include`.
+
+### Step 5: Extract structured knowledge
+
+```bash
+python scripts/step5_extract.py --db-path <db> --prepare-prompts --output-dir <workspace>/data/extraction_prompts
+```
+
+Then use `agents/extractor.md` and apply results with:
+
+```bash
+python scripts/step5_extract.py --db-path <db> --apply-json <extractions.json>
+```
+
+Only papers with fetched full text should enter extraction.
+
+The extractor output must match the apply schema accepted by `step5_extract.py`:
+
+- `paper_id`
+- `knowledge_points[]` with `knowledge_text`, `knowledge_type`, `source_type`
+- `background_summary`
+- `suggested_references[]`
+
+Do not rely on stale field names such as `contribution_summary` or `important_references`.
+
+### Step 6: Design blueprint
+
+```bash
+python scripts/step6_design.py --db-path <db> --dump
+```
+
+Then use `agents/curator.md` to create a blueprint and save it with:
+
+```bash
+python scripts/step6_design.py --db-path <db> --save-blueprint <blueprint.json>
+```
+
+### Step 7: Prepare chapter writing context
+
+```bash
+python scripts/step7_write.py --db-path <db> --chapter-tag <tag> --blueprint <workspace>/outputs/blueprint.json --sections-dir <workspace>/outputs/sections --output <workspace>/data/writing_contexts/<tag>.md
+```
+
+Write chapters sequentially. Later chapters must not be prepared before earlier chapter files exist.
+
+`step7_write.py` prepares context only. It does not draft the final section file. After preparing context, the main agent must write the corresponding `secN.tex` or `chN.tex` file inside `outputs/sections/`.
+
+Default writing language is English unless the user explicitly asks for another language and the render template supports it.
+Writing context must be chapter-scoped and should include both primary evidence and chapter-relevant citation papers.
+
+### Step 8: Render
+
+```bash
+python scripts/step8_render.py --db-path <db> --sections-dir <workspace>/outputs/sections --output-pdf <workspace>/outputs/review.pdf
+```
+
+Rendering is part of the default completion target. If `tectonic` needs network access to download bundles or fonts, request approval and continue to PDF rather than stopping at LaTeX source.
+
+Before render, validate article size:
+
+- target overall length: 8k-12k words
+- target overall citation count: 120-180 unique references
+- target chapter citation density: roughly 25-45 unique citations per chapter
+
+Warn explicitly when these targets are not met. Optionally block render in strict mode.
+
+## Stage Guards
+
+Use `step_status.py` or `run_pipeline.py` before running the next stage.
+
+```bash
+python scripts/step_status.py --db-path <db>
+python scripts/run_pipeline.py --db-path <db> --step next
+```
+
+These scripts enforce:
+
+- no screening before OpenAlex acquisition
+- no fetch before `include` papers exist
+- no extract before fetched full text exists
+- no design before extracted knowledge exists
+- no write before blueprint exists
+- no out-of-order chapter writing
+- no render before section files exist
+
+Guard interpretation:
+
+- `screen` remains the nominal next action while pending papers exist
+- later stages may still run once their explicit blockers are cleared, especially for seeded workflows on narrow topics
+- use stage guards to prevent invalid transitions, not to force all pending papers to be exhausted before any downstream work
+
+## Agent Responsibilities
+
+| Agent | Stage | Responsibility |
+|---|---|---|
+| `screener.md` | screening | Include/exclude/maybe decisions and full-text priority |
+| `extractor.md` | extraction | Knowledge points, background summary, suggested references |
+| `curator.md` | design | Review blueprint and chapter mapping |
+| `writer.md` | writing | LaTeX chapter drafting from prepared context |
+
+Canonical stage schemas live in `references/stage-schemas.md`. When agent markdown and script behavior differ, follow the canonical schema and script interface.
+
+## Non-Negotiable Constraints
+
+1. All review artifacts must stay inside the workspace.
+2. OpenAlex is the required initial acquisition source.
+3. Manual literature additions may calibrate or extend the corpus later, but they must not replace the initial OpenAlex pass.
+4. If a stage is blocked, stop and report the blocker instead of bypassing the SOP.
+5. A targeted second-pass OpenAlex acquisition may extend the corpus after the mandatory initial pass, but it must remain inside the same workspace and use saved query bundles.
+6. A review is only complete when the workspace contains chapter files and an attempted render output; default target is `<workspace>/outputs/review.pdf`.
